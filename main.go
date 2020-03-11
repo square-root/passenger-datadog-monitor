@@ -6,8 +6,11 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"io/ioutil"
 	"log"
 	"os/exec"
+	"path/filepath"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -32,12 +35,22 @@ const (
 var printOutput bool
 
 type passengerStatus struct {
-	XMLName      xml.Name  `xml:"info"`
-	ProcessCount int       `xml:"process_count"`
-	PoolMax      int       `xml:"max"`
-	PoolCurrent  int       `xml:"capacity_used"`
-	QueuedCount  []int     `xml:"supergroups>supergroup>group>get_wait_list_size"`
-	Processes    []process `xml:"supergroups>supergroup>group>processes>process"`
+	XMLName      xml.Name `xml:"info"`
+	ProcessCount int      `xml:"process_count"`
+	PoolMax      int      `xml:"max"`
+	PoolCurrent  int      `xml:"capacity_used"`
+	Groups       []group  `xml:"supergroups>supergroup>group"`
+	QueuedCount  []int
+	Processes    []process
+}
+
+type group struct {
+	Name            string    `xml:"name"`
+	AppRoot         string    `xml:"app_root"`
+	Processes       []process `xml:"processes>process"`
+	QueuedCount     []int     `xml:"get_wait_list_size"`
+	AppName         string
+	PassengerConfig passengerConfig
 }
 
 type process struct {
@@ -46,8 +59,11 @@ type process struct {
 	SpawnTime       int64 `xml:"spawn_end_time"`
 	CPU             int   `xml:"cpu"`
 	Memory          int   `xml:"real_memory"`
+	Swap            int   `xml:"swap"`
 	PID             int   `xml:"pid"`
 	LastUsed        int64 `xml:"last_used"`
+	Group           group
+	Tags            []string
 }
 
 //Stats is used to store stats
@@ -57,6 +73,11 @@ type Stats struct {
 	avg int
 	max int
 	sum int
+}
+
+type passengerConfig struct {
+	Root        string
+	MemoryLimit int
 }
 
 func summarizeStats(statsArray *[]int) Stats {
@@ -87,7 +108,7 @@ func retrievePassengerStats() (io.Reader, error) {
 	return bytes.NewReader(out), nil
 }
 
-func parsePassengerXML(xmlData *io.Reader) (passengerStatus, error) {
+func parsePassengerXML(xmlData *io.Reader, passengerConfigs map[string]passengerConfig) (passengerStatus, error) {
 	var ParsedPassengerXML passengerStatus
 	dec := xml.NewDecoder(*xmlData)
 	dec.CharsetReader = charset.NewReaderLabel
@@ -95,7 +116,63 @@ func parsePassengerXML(xmlData *io.Reader) (passengerStatus, error) {
 	if err != nil {
 		return passengerStatus{}, err
 	}
+
+	for _, group := range ParsedPassengerXML.Groups {
+		group.AppName = strings.Split(group.AppRoot, "/")[2]
+		rootPath := strings.Split(group.Name, " ")[0]
+		group.PassengerConfig = passengerConfigs[rootPath]
+
+		for _, process := range group.Processes {
+			process.Group = group
+			process.Tags = processTags(process)
+			ParsedPassengerXML.Processes = append(ParsedPassengerXML.Processes, process)
+		}
+		ParsedPassengerXML.QueuedCount = append(ParsedPassengerXML.QueuedCount, group.QueuedCount...)
+	}
 	return ParsedPassengerXML, nil
+}
+
+func processTags(process process) []string {
+	return []string{
+		fmt.Sprintf("pid:%d", process.PID),
+		fmt.Sprintf("passenger_group:%s", process.Group.Name),
+		fmt.Sprintf("passenger_root:%s", process.Group.AppRoot),
+		fmt.Sprintf("passenger_app:%s", process.Group.AppName),
+	}
+}
+
+func retrieveNginxPassengerConfigs() map[string]passengerConfig {
+	nginxConfigDirectory := "/etc/nginx/sites-enabled"
+	files, err := ioutil.ReadDir(nginxConfigDirectory)
+	if err != nil {
+		fmt.Println(err)
+		return nil
+	}
+
+	var passengerConfigs = make(map[string]passengerConfig)
+	re_memory_limit := regexp.MustCompile(`\s*passenger_memory_limit\s+(.*);`)
+	re_root := regexp.MustCompile(`\s*root\s+(.*);`)
+	for _, file := range files {
+		fileData, err := ioutil.ReadFile(filepath.Join(nginxConfigDirectory, file.Name()))
+		if err != nil {
+			return nil
+		}
+
+		fileContents := string(fileData)
+		passengerConfig := passengerConfig{
+			MemoryLimit: StringToInt(indexOrEmpty(re_memory_limit.FindStringSubmatch(fileContents), 1)),
+			Root:        indexOrEmpty(re_root.FindStringSubmatch(fileContents), 1),
+		}
+		passengerConfigs[passengerConfig.Root] = passengerConfig
+	}
+	return passengerConfigs
+}
+
+func indexOrEmpty(value []string, index int) string {
+	if len(value) <= index {
+		return ""
+	}
+	return value[index]
 }
 
 func floatMyInt(value int) float64 {
@@ -224,6 +301,15 @@ func chartProcessUse(passengerDetails *passengerStatus, DogStatsD *godspeed.Gods
 	_ = DogStatsD.Gauge("passenger.processes.used", floatMyInt(totalUsed), nil)
 }
 
+//go through each process in the tree and match their group
+func processesByPid(passengerDetails *passengerStatus) map[int]process {
+	processesByPid := make(map[int]process)
+	for _, process := range passengerDetails.Processes {
+		processesByPid[process.PID] = process
+	}
+	return processesByPid
+}
+
 //go through each process in the tree and get the per process thread count and per process last used time
 func processSystemThreadUsage(passengerDetails *passengerStatus) map[int]float64 {
 	var processThreads = make(map[int]float64)
@@ -273,10 +359,32 @@ func processPerThreadRequests(passengerDetails *passengerStatus) map[int]float64
 }
 
 func chartDiscreteMetrics(passengerDetails *passengerStatus, DogStatsD *godspeed.Godspeed) {
+	processesByPid := processesByPid(passengerDetails)
 	threadCountPerProcess := processSystemThreadUsage(passengerDetails)
 	threadMemoryUsages := processPerThreadMemoryUsage(passengerDetails)
 	threadIdletimes := processPerThreadIdleTime(passengerDetails)
 	threadProcessedCounts := processPerThreadRequests(passengerDetails)
+
+	if printOutput {
+		fmt.Println("\n|====Process Stats====|")
+	}
+	for index, process := range passengerDetails.Processes {
+		memoryLimit := floatMyInt(process.Group.PassengerConfig.MemoryLimit)
+		cpuUsage := floatMyInt(process.CPU)
+		swapUsage := floatMyInt(process.Swap)
+		if printOutput {
+			if index > 0 {
+				fmt.Println("----")
+			}
+			fmt.Printf("PID: %d\nMemory_Limit: %0.2f MB\n", process.PID, memoryLimit)
+			fmt.Printf("Memory_Limit: %v\n", memoryLimit)
+			fmt.Printf("CPU: %0.2f\n", cpuUsage)
+			fmt.Printf("Swap: %0.2f\n", swapUsage)
+		}
+		_ = DogStatsD.Gauge("passenger.process.memory_limit", memoryLimit, process.Tags)
+		_ = DogStatsD.Gauge("passenger.process.cpu", cpuUsage, process.Tags)
+		_ = DogStatsD.Gauge("passenger.process.swap", swapUsage, process.Tags)
+	}
 
 	if printOutput {
 		fmt.Println("\n|====Process Thread Counts====|")
@@ -285,8 +393,8 @@ func chartDiscreteMetrics(passengerDetails *passengerStatus, DogStatsD *godspeed
 		if printOutput {
 			fmt.Printf("PID: %d  Running: %0.2f threads\n", pid, count)
 		}
-		tag := fmt.Sprintf("pid:%d", pid)
-		_ = DogStatsD.Gauge("passenger.process.threads", count, []string{tag})
+		process := processesByPid[pid]
+		_ = DogStatsD.Gauge("passenger.process.threads", count, process.Tags)
 	}
 
 	if printOutput {
@@ -296,8 +404,8 @@ func chartDiscreteMetrics(passengerDetails *passengerStatus, DogStatsD *godspeed
 		if printOutput {
 			fmt.Printf("PID: %d Memory_Used: %0.2f MB\n", pid, memUse)
 		}
-		tag := fmt.Sprintf("pid:%d", pid)
-		_ = DogStatsD.Gauge("passenger.process.memory", memUse, []string{tag})
+		process := processesByPid[pid]
+		_ = DogStatsD.Gauge("passenger.process.memory", memUse, process.Tags)
 	}
 
 	if printOutput {
@@ -307,8 +415,8 @@ func chartDiscreteMetrics(passengerDetails *passengerStatus, DogStatsD *godspeed
 		if printOutput {
 			fmt.Printf("PID: %d Idle: %d Seconds\n", pid, int(seconds))
 		}
-		tag := fmt.Sprintf("pid:%d", pid)
-		_ = DogStatsD.Gauge("passenger.process.last_used", seconds, []string{tag})
+		process := processesByPid[pid]
+		_ = DogStatsD.Gauge("passenger.process.last_used", seconds, process.Tags)
 	}
 
 	if printOutput {
@@ -318,9 +426,17 @@ func chartDiscreteMetrics(passengerDetails *passengerStatus, DogStatsD *godspeed
 		if printOutput {
 			fmt.Printf("PID: %d Processed: %d Requests\n", pid, int(count))
 		}
-		tag := fmt.Sprintf("pid:%d", pid)
-		_ = DogStatsD.Gauge("passenger.process.request_processed", count, []string{tag})
+		process := processesByPid[pid]
+		_ = DogStatsD.Gauge("passenger.process.request_processed", count, process.Tags)
 	}
+}
+
+func StringToInt(value string) int {
+	intValue, err := strconv.Atoi(value)
+	if err != nil {
+		return -1
+	}
+	return intValue
 }
 
 func main() {
@@ -346,7 +462,8 @@ func main() {
 			log.Fatal("Error getting passenger data:", err)
 		}
 
-		PassengerStatusData, err := parsePassengerXML(&xmlData)
+		passengerConfigs := retrieveNginxPassengerConfigs()
+		PassengerStatusData, err := parsePassengerXML(&xmlData, passengerConfigs)
 		if err != nil {
 			log.Fatal("Error parsing passenger data:", err)
 		}
