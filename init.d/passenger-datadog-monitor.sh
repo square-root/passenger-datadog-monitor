@@ -1,69 +1,127 @@
-#!/bin/env sh
+#!/bin/bash
 #
 # passenger-datadog-monitor
+#
+# chkconfig: - 99 01
+# description: send metrics from Passenger to Datadog
 
 # Source function library.
 . /etc/init.d/functions
 
 RETVAL=0
-prog="passenger-datadog-monitor"
-PIDFILE=/var/run/$prog.pid
+PDM="passenger-datadog-monitor"
+PDMDIR="/usr/local/bin"
+PIDFILE="/var/run/${PDM}.pid"
+LOGFILE="/tmp/passenger-datadog-monitor.log"
 
-
+################################################################################
+# Start the service
+# Globals:
+#   LOGFILE
+#   PDM
+#   PDMDIR
+#   PIDFILE
+# Arguments:
+#   None
+# Returns:
+#   RETVAL
+################################################################################
 start() {
-        printf "%s\n" "Starting $prog: "
-        PID=`nohup /usr/bin/passenger-datadog-monitor > /tmp/passenger-datadog-monitor.log 2>&1 & echo $!`
-        RETVAL=$?
-        if [ $RETVAL -eq 0 ]; then
-          echo "$PID" > $PIDFILE
-          printf "%s\n" "Ok"
-        fi
-        return $RETVAL
+  if [[ -n "$(get_pid)" ]]; then
+    printf "%s\n" "Can't start; ${PDM} already running"
+    exit 1
+  fi
+  printf "%s\n" "Starting ${PDM}: "
+  ## 'su' needed here b/c we use RVM
+  su - root -c "/usr/bin/nohup ${PDMDIR}/${PDM} > ${LOGFILE} 2>&1 &"
+  if [[ "${RETVAL}" -eq 0 ]]; then
+    PID="$(get_pid)"
+    echo "${PID}" >"${PIDFILE}"
+    printf "%s\n" "Ok"
+  fi
+  return "${RETVAL}"
 }
 
+################################################################################
+# Stop the service
+# Globals:
+#   PDM
+#   PIDFILE
+# Arguments:
+#   None
+# Returns:
+#   None
+################################################################################
 stop() {
-        echo -n "Shutting down $prog: "
-        PID=`cat $PIDFILE`
-        if [ -f $PIDFILE ]; then
-            kill -9 $PID
-            printf "%s\n" "Ok"
-            rm -f $PIDFILE
-        else
-            printf "%s\n" "pidfile not found"
-        fi
+  echo -n "Shutting down ${PDM}: "
+  if [[ -f "${PIDFILE}" ]]; then
+    kill -9 "$(cat ${PIDFILE})"
+    printf "%s\n" "Ok"
+    rm -f "${PIDFILE}"
+  else
+    printf "%s\n" "pidfile not found"
+  fi
 }
 
+################################################################################
+# Print service status
+# Globals:
+#   PDM
+#   PIDFILE
+# Arguments:
+#   None
+# Returns:
+#   None
+################################################################################
 status() {
-        echo -n "Checking $prog status: "
-        if [ -f $PIDFILE ]; then
-            PID=`cat $PIDFILE`
-            if [ -z "`ps axf | grep ${PID} | grep -v grep`" ]; then
-                printf "%s\n" $prog" dead but pidfile exists"
-            else
-                echo $prog" Running"
-            fi
-        else
-            printf "%s\n" $prog" not running"
-        fi
+  echo -n "Checking ${PDM} status: "
+  if [[ -f "${PIDFILE}" ]]; then
+    PID="$(cat ${PIDFILE})"
+    if [[ -z "$(ps axf | grep ${PID} | grep -v grep)" ]]; then
+      printf "%s\n" "${PDM} dead but pidfile exists"
+    else
+      echo "${PDM} Running"
+    fi
+  else
+    printf "%s\n" "${PDM} not running"
+  fi
 }
 
-case "$1" in
+################################################################################
+# Get the process ID of the service
+# Globals:
+#   PDM
+#   PIDFILE
+# Arguments:
+#   None
+# Returns:
+#   None
+################################################################################
+get_pid() {
+  pgrep -f -x "${PDMDIR}/${PDM}"
+}
+
+main() {
+  case $1 in
     start)
-        start
-        ;;
+      start
+      ;;
     stop)
-        stop
-        ;;
+      stop
+      ;;
     status)
-        status
-        ;;
+      status
+      ;;
     restart)
-        stop
-        start
-        ;;
+      stop
+      start
+      ;;
     *)
-        echo "Usage: $prog {start|stop|status|restart}"
-        exit 1
-        ;;
-esac
-exit $RETVAL
+      echo "Usage: ${PDM} {start|stop|status|restart}"
+      exit 1
+      ;;
+  esac
+  exit "${RETVAL}"
+}
+
+main "$@"
