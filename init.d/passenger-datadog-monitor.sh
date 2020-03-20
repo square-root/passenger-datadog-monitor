@@ -79,11 +79,13 @@ status() {
     PID="$(cat ${PIDFILE})"
     if [[ -z "$(ps axf | grep ${PID} | grep -v grep)" ]]; then
       printf "%s\n" "${PDM} dead but pidfile exists"
+      exit 1
     else
       echo "${PDM} Running"
     fi
   else
     printf "%s\n" "${PDM} not running"
+    exit 3
   fi
 }
 
