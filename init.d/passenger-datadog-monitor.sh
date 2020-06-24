@@ -13,6 +13,8 @@ PDM="passenger-datadog-monitor"
 PDMDIR="/usr/local/bin"
 PIDFILE="/var/run/${PDM}.pid"
 LOGFILE="/tmp/passenger-datadog-monitor.log"
+SLEEPTIME=".5" # 1/2 second
+SLEEPCOUNT="11"
 
 ################################################################################
 # Start the service
@@ -21,6 +23,8 @@ LOGFILE="/tmp/passenger-datadog-monitor.log"
 #   PDM
 #   PDMDIR
 #   PIDFILE
+#   SLEEPTIME
+#   SLEEPCOUNT
 # Arguments:
 #   None
 # Returns:
@@ -36,7 +40,19 @@ start() {
   su - root -c "/usr/bin/nohup ${PDMDIR}/${PDM} > ${LOGFILE} 2>&1 &"
   if [[ "${RETVAL}" -eq 0 ]]; then
     PID="$(get_pid)"
-    echo "${PID}" >"${PIDFILE}"
+    echo "${PID}" > "${PIDFILE}"
+    PIDCOUNT="$(wc -l ${PIDFILE} | awk '{print $1}')"
+    while [[ "${PIDCOUNT}" -ne 1 ]]; do
+      sleep "${SLEEPTIME}"
+      (( SLEEPCOUNT-- ))
+      if [[ "${SLEEPCOUNT}" -eq 0 ]]; then
+        echo "There are multiple ${PDM} processes running, please check."
+        exit 1
+      fi
+      PID="$(get_pid)"
+      echo "${PID}" > "${PIDFILE}"
+      PIDCOUNT="$(wc -l ${PIDFILE} | awk '{print $1}')"
+    done
     printf "%s\n" "Ok"
   fi
   return "${RETVAL}"
