@@ -37,10 +37,10 @@ start() {
   fi
   printf "%s\n" "Starting ${PDM}: "
   ## 'su' needed here b/c we use RVM
-  su - root -c "/usr/bin/nohup ${PDMDIR}/${PDM} > ${LOGFILE} 2>&1 &"
+  su - root -c "/usr/bin/nohup ${PDMDIR}/${PDM} >${LOGFILE} 2>&1 &"
   if [[ "${RETVAL}" -eq 0 ]]; then
     PID="$(get_pid)"
-    echo "${PID}" > "${PIDFILE}"
+    echo "${PID}" >"${PIDFILE}"
     PIDCOUNT="$(wc -l ${PIDFILE} | awk '{print $1}')"
     while [[ "${PIDCOUNT}" -ne 1 ]]; do
       sleep "${SLEEPTIME}"
@@ -50,7 +50,7 @@ start() {
         exit 1
       fi
       PID="$(get_pid)"
-      echo "${PID}" > "${PIDFILE}"
+      echo "${PID}" >"${PIDFILE}"
       PIDCOUNT="$(wc -l ${PIDFILE} | awk '{print $1}')"
     done
     printf "%s\n" "Ok"
