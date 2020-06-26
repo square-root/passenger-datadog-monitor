@@ -13,7 +13,6 @@ PDM="passenger-datadog-monitor"
 PDMDIR="/usr/local/bin"
 PIDFILE="/var/run/${PDM}.pid"
 LOGFILE="/tmp/passenger-datadog-monitor.log"
-SLEEPTIME=".5" # 1/2 second
 SLEEPCOUNT="11"
 
 ################################################################################
@@ -31,7 +30,8 @@ SLEEPCOUNT="11"
 #   RETVAL
 ################################################################################
 start() {
-  if [[ -n "$(get_pid)" ]]; then
+  PIDS=( $(get_pid) )
+  if [[ "${#PIDS[@]}" -gt 0 ]]; then
     printf "%s\n" "Can't start; ${PDM} already running"
     exit 1
   fi
@@ -39,20 +39,22 @@ start() {
   ## 'su' needed here b/c we use RVM
   su - root -c "/usr/bin/nohup ${PDMDIR}/${PDM} >${LOGFILE} 2>&1 &"
   if [[ "${RETVAL}" -eq 0 ]]; then
-    PID="$(get_pid)"
-    echo "${PID}" >"${PIDFILE}"
-    PIDCOUNT="$(wc -l ${PIDFILE} | awk '{print $1}')"
-    while [[ "${PIDCOUNT}" -ne 1 ]]; do
-      sleep "${SLEEPTIME}"
-      (( SLEEPCOUNT-- ))
+  while true; do
+    PIDS=( $(get_pid) )
+    if [[ "${#PIDS[@]}" -gt 1 ]]; then
       if [[ "${SLEEPCOUNT}" -eq 0 ]]; then
-        echo "There are multiple ${PDM} processes running, please check."
+        echo "ERROR: Expected 1 process ID for ${PDM} but found ${#PIDS[@]}."
+        echo "Process ID's:"
+        echo "${PIDS[@]}"
         exit 1
       fi
-      PID="$(get_pid)"
-      echo "${PID}" >"${PIDFILE}"
-      PIDCOUNT="$(wc -l ${PIDFILE} | awk '{print $1}')"
-    done
+      sleep .5
+      (( SLEEPCOUNT-- ))
+    else
+      echo "${PIDS[@]}" >"${PIDFILE}"
+      break
+    fi
+  done
     printf "%s\n" "Ok"
   fi
   return "${RETVAL}"
@@ -97,7 +99,7 @@ status() {
       printf "%s\n" "${PDM} dead but pidfile exists"
       exit 1
     else
-      echo "${PDM} Running"
+      echo "${PDM} running, process ID: ${PID}"
     fi
   else
     printf "%s\n" "${PDM} not running"
@@ -108,15 +110,16 @@ status() {
 ################################################################################
 # Get the process ID of the service
 # Globals:
+#   PDMDIR
 #   PDM
-#   PIDFILE
 # Arguments:
 #   None
 # Returns:
-#   None
+#   PID
 ################################################################################
 get_pid() {
-  pgrep -f -x "${PDMDIR}/${PDM}"
+  mapfile -t PID < <(pgrep -f -x "${PDMDIR}/${PDM}")
+  echo "${PID[@]}"
 }
 
 main() {
