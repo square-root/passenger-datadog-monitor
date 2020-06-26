@@ -22,7 +22,6 @@ SLEEPCOUNT="11"
 #   PDM
 #   PDMDIR
 #   PIDFILE
-#   SLEEPTIME
 #   SLEEPCOUNT
 # Arguments:
 #   None
